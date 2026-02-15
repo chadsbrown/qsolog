@@ -549,7 +549,10 @@ impl QsoStore {
 
     fn rollback_patch(&mut self, id: QsoId, prev: &QsoPatch) -> Result<(), StoreError> {
         let (old_call, old_contest, new_call, new_contest) = {
-            let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+            let rec = self
+                .records
+                .get_mut(&id)
+                .ok_or(StoreError::MissingQso(id))?;
             let old_call = rec.callsign_norm.clone();
             let old_contest = rec.contest_instance_id;
             prev.apply_to(rec);
@@ -573,7 +576,10 @@ impl QsoStore {
     }
 
     fn rollback_void(&mut self, id: QsoId, prev_is_void: bool) -> Result<(), StoreError> {
-        let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+        let rec = self
+            .records
+            .get_mut(&id)
+            .ok_or(StoreError::MissingQso(id))?;
         rec.flags.is_void = prev_is_void;
         Ok(())
     }
