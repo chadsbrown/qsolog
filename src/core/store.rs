@@ -57,6 +57,15 @@ pub struct QsoStore {
     next_qso_id: QsoId,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MutationCheckpoint {
+    undo_len: usize,
+    redo_len: usize,
+    pending_ops_len: usize,
+    next_op_seq: OpSeq,
+    next_qso_id: QsoId,
+}
+
 impl QsoStore {
     /// Creates an empty store.
     pub fn new() -> Self {
@@ -245,6 +254,11 @@ impl QsoStore {
         std::mem::take(&mut self.pending_ops)
     }
 
+    /// Clears buffered pending operations without allocating.
+    pub fn clear_pending_ops(&mut self) {
+        self.pending_ops.clear();
+    }
+
     /// Number of undo entries.
     pub fn undo_len(&self) -> usize {
         self.undo.len()
@@ -258,6 +272,35 @@ impl QsoStore {
     /// Latest emitted sequence number, or 0 when none.
     pub fn latest_op_seq(&self) -> OpSeq {
         self.next_op_seq.saturating_sub(1)
+    }
+
+    pub(crate) fn mutation_checkpoint(&self) -> MutationCheckpoint {
+        MutationCheckpoint {
+            undo_len: self.undo.len(),
+            redo_len: self.redo.len(),
+            pending_ops_len: self.pending_ops.len(),
+            next_op_seq: self.next_op_seq,
+            next_qso_id: self.next_qso_id,
+        }
+    }
+
+    pub(crate) fn rollback_mutation(
+        &mut self,
+        checkpoint: MutationCheckpoint,
+        stored: &StoredOp,
+    ) -> Result<(), StoreError> {
+        match &stored.op {
+            Op::Insert { qso } => self.rollback_insert(qso.id)?,
+            Op::Patch { id, prev, .. } => self.rollback_patch(*id, prev)?,
+            Op::Void { id, prev_is_void } => self.rollback_void(*id, *prev_is_void)?,
+        }
+
+        self.next_op_seq = checkpoint.next_op_seq;
+        self.next_qso_id = checkpoint.next_qso_id;
+        self.undo.truncate(checkpoint.undo_len);
+        self.redo.truncate(checkpoint.redo_len);
+        self.pending_ops.truncate(checkpoint.pending_ops_len);
+        Ok(())
     }
 
     fn apply_op(&mut self, op: Op) -> Result<(StoredOp, Op), StoreError> {
@@ -404,6 +447,21 @@ impl QsoStore {
             .push(rec.id);
     }
 
+    fn remove_indices(&mut self, rec: &QsoRecord) {
+        if let Some(ids) = self.by_call.get_mut(&rec.callsign_norm) {
+            ids.retain(|v| *v != rec.id);
+            if ids.is_empty() {
+                self.by_call.remove(&rec.callsign_norm);
+            }
+        }
+        if let Some(ids) = self.by_contest.get_mut(&rec.contest_instance_id) {
+            ids.retain(|v| *v != rec.id);
+            if ids.is_empty() {
+                self.by_contest.remove(&rec.contest_instance_id);
+            }
+        }
+    }
+
     fn update_call_index(&mut self, id: QsoId, old_call: &str, new_call: &str) {
         if let Some(ids) = self.by_call.get_mut(old_call) {
             ids.retain(|v| *v != id);
@@ -474,6 +532,50 @@ impl QsoStore {
 
     fn bump_next_seq_from(&mut self, seq: OpSeq) {
         self.next_op_seq = self.next_op_seq.max(seq.saturating_add(1));
+    }
+
+    fn rollback_insert(&mut self, id: QsoId) -> Result<(), StoreError> {
+        let rec = self.records.remove(&id).ok_or(StoreError::MissingQso(id))?;
+        self.remove_indices(&rec);
+
+        let idx = self.pos.remove(&id).ok_or(StoreError::MissingQso(id))?;
+        self.order.remove(idx);
+        for (i, qso_id) in self.order.iter().copied().enumerate().skip(idx) {
+            self.pos.insert(qso_id, i);
+        }
+
+        Ok(())
+    }
+
+    fn rollback_patch(&mut self, id: QsoId, prev: &QsoPatch) -> Result<(), StoreError> {
+        let (old_call, old_contest, new_call, new_contest) = {
+            let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+            let old_call = rec.callsign_norm.clone();
+            let old_contest = rec.contest_instance_id;
+            prev.apply_to(rec);
+            (
+                old_call,
+                old_contest,
+                rec.callsign_norm.clone(),
+                rec.contest_instance_id,
+            )
+        };
+
+        if old_call != new_call {
+            self.update_call_index(id, &old_call, &new_call);
+        }
+        if old_contest != new_contest {
+            self.update_contest_index(id, old_contest, new_contest);
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_indices_consistent();
+        Ok(())
+    }
+
+    fn rollback_void(&mut self, id: QsoId, prev_is_void: bool) -> Result<(), StoreError> {
+        let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+        rec.flags.is_void = prev_is_void;
+        Ok(())
     }
 }
 

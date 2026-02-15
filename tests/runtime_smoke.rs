@@ -111,6 +111,27 @@ async fn runtime_insert_patch_query_and_events_ordered() {
 }
 
 #[tokio::test]
+async fn no_persistence_does_not_emit_durable_events() {
+    let handle = spawn_qsolog(QsoStore::new(), None, RuntimeConfig::default());
+    let mut sub = handle.subscribe();
+
+    let id = handle.insert(draft("W1NOP", 10)).await.expect("insert");
+    let evt = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+        .await
+        .expect("event")
+        .expect("recv");
+    assert_eq!(evt, QsoEvent::Inserted { id });
+
+    let second = tokio::time::timeout(Duration::from_millis(150), sub.recv()).await;
+    assert!(
+        second.is_err(),
+        "expected no additional durability events when persistence is disabled"
+    );
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = SlowSink {
@@ -133,6 +154,7 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
 
     let id = handle.insert(draft("N0CALL", 1)).await.expect("insert");
     assert_eq!(id, 1);
+    let mut accepted = 1usize;
 
     let mut durable_seen = false;
     for _ in 0..5 {
@@ -150,14 +172,24 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
     let mut queue_error_seen = false;
     for i in 0..12u64 {
         let r = handle.insert(draft(&format!("K{i}"), i + 2)).await;
-        if let Err(RuntimeError::PersistQueueFull) = r {
-            queue_error_seen = true;
-            break;
+        match r {
+            Ok(_) => accepted += 1,
+            Err(RuntimeError::PersistQueueFull) => {
+                queue_error_seen = true;
+                break;
+            }
+            Err(other) => panic!("unexpected runtime error: {other:?}"),
         }
     }
     assert!(
         queue_error_seen,
         "expected persistence queue pressure to surface as error"
+    );
+    let recent = handle.recent(100).await.expect("recent");
+    assert_eq!(
+        recent.len(),
+        accepted,
+        "store should not retain mutations rejected by persistence queue"
     );
 
     handle.shutdown().await.expect("shutdown");

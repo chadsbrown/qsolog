@@ -429,15 +429,17 @@ async fn handle_command(
                 let _ = resp.send(Err(err));
                 return false;
             }
+            let checkpoint = store.mutation_checkpoint();
             let res = match store.insert(draft) {
                 Ok((id, stored)) => {
+                    store.clear_pending_ops();
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
                         persistence_state,
                         store.latest_op_seq(),
-                        stored,
+                        stored.clone(),
                     )
                     .await;
                     match persist_res {
@@ -445,7 +447,10 @@ async fn handle_command(
                             let _ = events_tx.send(QsoEvent::Inserted { id });
                             Ok(id)
                         }
-                        Err(err) => Err(err),
+                        Err(err) => match store.rollback_mutation(checkpoint, &stored) {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(RuntimeError::from(rollback_err)),
+                        },
                     }
                 }
                 Err(err) => Err(RuntimeError::from(err)),
@@ -461,15 +466,17 @@ async fn handle_command(
                 let _ = resp.send(Err(err));
                 return false;
             }
+            let checkpoint = store.mutation_checkpoint();
             let res = match store.patch(id, patch) {
                 Ok((_, stored)) => {
+                    store.clear_pending_ops();
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
                         persistence_state,
                         store.latest_op_seq(),
-                        stored,
+                        stored.clone(),
                     )
                     .await;
                     match persist_res {
@@ -477,7 +484,10 @@ async fn handle_command(
                             let _ = events_tx.send(QsoEvent::Updated { id });
                             Ok(())
                         }
-                        Err(err) => Err(err),
+                        Err(err) => match store.rollback_mutation(checkpoint, &stored) {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(RuntimeError::from(rollback_err)),
+                        },
                     }
                 }
                 Err(err) => Err(RuntimeError::from(err)),
@@ -489,15 +499,17 @@ async fn handle_command(
                 let _ = resp.send(Err(err));
                 return false;
             }
+            let checkpoint = store.mutation_checkpoint();
             let res = match store.void(id) {
                 Ok((_, stored)) => {
+                    store.clear_pending_ops();
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
                         persistence_state,
                         store.latest_op_seq(),
-                        stored,
+                        stored.clone(),
                     )
                     .await;
                     match persist_res {
@@ -505,7 +517,10 @@ async fn handle_command(
                             let _ = events_tx.send(QsoEvent::Voided { id });
                             Ok(())
                         }
-                        Err(err) => Err(err),
+                        Err(err) => match store.rollback_mutation(checkpoint, &stored) {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(RuntimeError::from(rollback_err)),
+                        },
                     }
                 }
                 Err(err) => Err(RuntimeError::from(err)),
@@ -517,15 +532,17 @@ async fn handle_command(
                 let _ = resp.send(Err(err));
                 return false;
             }
+            let checkpoint = store.mutation_checkpoint();
             let res = match store.undo() {
                 Ok((_, stored)) => {
+                    store.clear_pending_ops();
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
                         persistence_state,
                         store.latest_op_seq(),
-                        stored,
+                        stored.clone(),
                     )
                     .await;
                     match persist_res {
@@ -533,7 +550,10 @@ async fn handle_command(
                             let _ = events_tx.send(QsoEvent::UndoApplied);
                             Ok(())
                         }
-                        Err(err) => Err(err),
+                        Err(err) => match store.rollback_mutation(checkpoint, &stored) {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(RuntimeError::from(rollback_err)),
+                        },
                     }
                 }
                 Err(err) => Err(RuntimeError::from(err)),
@@ -545,15 +565,17 @@ async fn handle_command(
                 let _ = resp.send(Err(err));
                 return false;
             }
+            let checkpoint = store.mutation_checkpoint();
             let res = match store.redo() {
                 Ok((_, stored)) => {
+                    store.clear_pending_ops();
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
                         persistence_state,
                         store.latest_op_seq(),
-                        stored,
+                        stored.clone(),
                     )
                     .await;
                     match persist_res {
@@ -561,7 +583,10 @@ async fn handle_command(
                             let _ = events_tx.send(QsoEvent::RedoApplied);
                             Ok(())
                         }
-                        Err(err) => Err(err),
+                        Err(err) => match store.rollback_mutation(checkpoint, &stored) {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(RuntimeError::from(rollback_err)),
+                        },
                     }
                 }
                 Err(err) => Err(RuntimeError::from(err)),
@@ -826,8 +851,6 @@ async fn persist_after_mutation(
         } else if !persistence_state.read().await.is_healthy {
             let _ = events_tx.send(QsoEvent::NotDurableWarning { op_seq: latest_seq });
         }
-    } else {
-        let _ = events_tx.send(QsoEvent::DurableUpTo { op_seq: latest_seq });
     }
     Ok(())
 }
