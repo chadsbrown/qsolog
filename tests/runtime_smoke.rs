@@ -150,7 +150,7 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
     let mut queue_error_seen = false;
     for i in 0..12u64 {
         let r = handle.insert(draft(&format!("K{i}"), i + 2)).await;
-        if let Err(RuntimeError::Persist(_)) = r {
+        if let Err(RuntimeError::PersistQueueFull) = r {
             queue_error_seen = true;
             break;
         }

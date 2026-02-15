@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use tokio::{
+    sync::mpsc::error::TrySendError,
     sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
     time::{Duration, Instant},
 };
@@ -26,6 +27,8 @@ pub enum RuntimeError {
     Persist(PersistError),
     /// Internal channel closed unexpectedly.
     ChannelClosed,
+    /// Persistence queue is full and mutation was rejected.
+    PersistQueueFull,
     /// Persistence is unhealthy and current ack policy requires durability.
     PersistenceUnhealthy(String),
 }
@@ -795,10 +798,11 @@ async fn maybe_auto_checkpoint(
 }
 
 fn enqueue_persist(tx: &mpsc::Sender<PersistMsg>, stored: StoredOp) -> Result<(), RuntimeError> {
-    tx.try_send(PersistMsg::Op(Box::new(stored)))
-        .map_err(|err| {
-            RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}")))
-        })
+    match tx.try_send(PersistMsg::Op(Box::new(stored))) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(RuntimeError::PersistQueueFull),
+        Err(TrySendError::Closed(_)) => Err(RuntimeError::ChannelClosed),
+    }
 }
 
 async fn persist_after_mutation(

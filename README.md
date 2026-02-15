@@ -51,6 +51,11 @@ Durability progress is emitted via:
 
 - `QsoEvent::DurableUpTo { op_seq }`
 
+Backpressure policy is explicit:
+
+- bounded persistence queue uses **error-on-full** semantics (`RuntimeError::PersistQueueFull`)
+- no silent dropping of operations
+
 ## SQLite Notes
 
 On connection open, the sink sets:
