@@ -86,3 +86,43 @@ fn snapshot_and_compaction_preserve_replay() {
     assert_eq!(replayed.export_snapshot().order, snapshot.order);
     assert_eq!(replayed.export_snapshot().records, snapshot.records);
 }
+
+#[test]
+fn replay_from_snapshot_plus_tail_events_matches_exact_state() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_path = tmp.path().join("tail.db");
+
+    let mut store = QsoStore::new();
+    let mut sink = SqliteOpSink::open(&db_path).expect("open sqlite");
+
+    for i in 0..6u64 {
+        let _ = store.insert(draft(&format!("W{i}AAA"), i)).expect("insert");
+    }
+    sink.append_ops(&store.drain_pending_ops()).expect("append seed");
+
+    let snapshot = store.export_snapshot();
+    let snapshot_seq = store.latest_op_seq();
+    sink.write_snapshot(&snapshot, snapshot_seq).expect("snapshot");
+
+    let (_, _) = store
+        .patch(
+            2,
+            QsoPatch {
+                callsign_raw: Some("W2ZZZ".to_string()),
+                callsign_norm: Some("W2ZZZ".to_string()),
+                ..QsoPatch::default()
+            },
+        )
+        .expect("patch tail");
+    let (_, _) = store.void(4).expect("void tail");
+    let _ = store.insert(draft("W9NEW", 99)).expect("insert tail");
+
+    sink.append_ops(&store.drain_pending_ops()).expect("append tail");
+    drop(sink);
+
+    let reopened = SqliteOpSink::open(&db_path).expect("reopen");
+    let replayed = reopened.load_store().expect("replay");
+
+    assert_eq!(replayed.export_snapshot().order, store.export_snapshot().order);
+    assert_eq!(replayed.export_snapshot().records, store.export_snapshot().records);
+}

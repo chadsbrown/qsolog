@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     core::store::{QsoStore, StoreSnapshotV1},
-    op::{Op, StoredOp},
+    op::{Op, StoredOp, StoredOpEnvelope},
     types::{OpSeq, QsoId},
 };
 
@@ -66,11 +66,11 @@ impl SqliteOpSink {
             let seq: i64 = row.get(0)?;
             let ts_ms: i64 = row.get(1)?;
             let payload: Vec<u8> = row.get(2)?;
-            let mut op: StoredOp = serde_json::from_slice(&payload).map_err(|err| {
+            let mut op = decode_stored_op_payload(&payload).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
                     payload.len(),
                     rusqlite::types::Type::Blob,
-                    Box::new(err),
+                    Box::new(std::io::Error::other(err)),
                 )
             })?;
             op.seq = seq as OpSeq;
@@ -148,7 +148,7 @@ impl OpSink for SqliteOpSink {
                 "INSERT INTO events(seq, ts_ms, kind, qso_id, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for stored in ops {
-                let payload = serde_json::to_vec(stored)?;
+                let payload = serde_json::to_vec(&StoredOpEnvelope::new(stored.clone()))?;
                 let (kind, qso_id) = op_kind_and_id(&stored.op);
                 stmt.execute(params![
                     stored.seq as i64,
@@ -191,4 +191,19 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn decode_stored_op_payload(payload: &[u8]) -> Result<StoredOp, String> {
+    if let Ok(envelope) = serde_json::from_slice::<StoredOpEnvelope>(payload) {
+        if envelope.format_version != crate::op::OP_FORMAT_VERSION {
+            return Err(format!(
+                "unsupported op format version: {}",
+                envelope.format_version
+            ));
+        }
+        return Ok(envelope.stored);
+    }
+
+    // Backward-compatible path for older payloads that stored raw StoredOp.
+    serde_json::from_slice::<StoredOp>(payload).map_err(|e| format!("op payload decode failed: {e}"))
 }

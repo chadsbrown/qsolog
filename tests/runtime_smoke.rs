@@ -6,7 +6,7 @@ use qsolog::{
     qso::{ExchangeBlob, QsoDraft, QsoFlags, QsoPatch},
     runtime::{
         events::QsoEvent,
-        handle::{spawn_qsolog, RuntimeConfig, RuntimeError},
+        handle::{spawn_qsolog, AckMode, RuntimeConfig, RuntimeError},
     },
     types::{Band, Mode, OpSeq},
 };
@@ -93,6 +93,7 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
     };
 
     let cfg = RuntimeConfig {
+        ack_mode: AckMode::InMemory,
         flush_on_insert: true,
         batch_max_ops: 16,
         batch_max_latency_ms: 500,
@@ -132,4 +133,34 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
 
     handle.shutdown().await.expect("shutdown");
     assert!(!seen.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn durable_ack_mode_waits_for_persistence_before_returning() {
+    let sink = SlowSink {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::from_millis(150),
+    };
+
+    let cfg = RuntimeConfig {
+        ack_mode: AckMode::Durable,
+        flush_on_insert: false,
+        batch_max_ops: 64,
+        batch_max_latency_ms: 5_000,
+        persist_queue_bound: 8,
+        snapshot_every_ops: 0,
+        compact_after_snapshot: false,
+    };
+
+    let handle = spawn_qsolog(QsoStore::new(), Some(Box::new(sink)), cfg);
+    let start = tokio::time::Instant::now();
+    let _id = handle.insert(draft("K9DUR", 100)).await.expect("insert");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(120),
+        "durable ack should wait for sink flush; elapsed={elapsed:?}"
+    );
+
+    handle.shutdown().await.expect("shutdown");
 }

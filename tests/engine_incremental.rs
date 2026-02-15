@@ -1,4 +1,5 @@
 use hashbrown::{HashMap, HashSet};
+use proptest::prelude::*;
 
 use qsolog::{
     core::store::QsoStore,
@@ -151,6 +152,25 @@ fn full_recompute_projection(store: &QsoStore) -> HashMap<QsoId, EngineApplied<T
     out
 }
 
+#[derive(Debug, Clone)]
+enum EAction {
+    Insert { idx: u8 },
+    PatchCall { target: u8, idx: u8 },
+    Void { target: u8 },
+    Undo,
+    Redo,
+}
+
+fn eaction_strategy() -> impl Strategy<Value = EAction> {
+    prop_oneof![
+        (0u8..16).prop_map(|idx| EAction::Insert { idx }),
+        (0u8..32, 0u8..16).prop_map(|(target, idx)| EAction::PatchCall { target, idx }),
+        (0u8..32).prop_map(|target| EAction::Void { target }),
+        Just(EAction::Undo),
+        Just(EAction::Redo),
+    ]
+}
+
 #[test]
 fn incremental_projection_matches_full_recompute_and_undo_redo_restores() {
     let mut store = QsoStore::new();
@@ -208,4 +228,61 @@ fn incremental_projection_matches_full_recompute_and_undo_redo_restores() {
     let (_, redo_op) = store.redo().expect("redo");
     projector.apply_stored_op(&store, &redo_op).expect("proj redo");
     assert_eq!(projector.applied().clone(), after_patch);
+}
+
+proptest! {
+    #[test]
+    fn incremental_projection_matches_full_recompute_for_random_sequences(
+        actions in prop::collection::vec(eaction_strategy(), 1..150)
+    ) {
+        let mut store = QsoStore::new();
+        let mut projector = Projector::new(ToyEngine);
+
+        for action in actions {
+            let maybe_op = match action {
+                EAction::Insert { idx } => {
+                    let (_id, op) = store.insert(draft(&format!("R{idx}AA"))).expect("insert");
+                    Some(op)
+                }
+                EAction::PatchCall { target, idx } => {
+                    let ids = store.ordered_ids().to_vec();
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        let id = ids[usize::from(target) % ids.len()];
+                        let (_, op) = store.patch(id, QsoPatch {
+                            callsign_raw: Some(format!("R{idx}AA")),
+                            callsign_norm: Some(format!("R{idx}AA")),
+                            ..QsoPatch::default()
+                        }).expect("patch");
+                        Some(op)
+                    }
+                }
+                EAction::Void { target } => {
+                    let ids = store.ordered_ids().to_vec();
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        let id = ids[usize::from(target) % ids.len()];
+                        let (_, op) = store.void(id).expect("void");
+                        Some(op)
+                    }
+                }
+                EAction::Undo => match store.undo() {
+                    Ok((_, op)) => Some(op),
+                    Err(_) => None,
+                },
+                EAction::Redo => match store.redo() {
+                    Ok((_, op)) => Some(op),
+                    Err(_) => None,
+                },
+            };
+
+            if let Some(op) = maybe_op {
+                projector.apply_stored_op(&store, &op).expect("project");
+            }
+
+            prop_assert_eq!(projector.applied(), &full_recompute_projection(&store));
+        }
+    }
 }

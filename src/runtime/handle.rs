@@ -35,7 +35,15 @@ impl From<PersistError> for RuntimeError {
 }
 
 #[derive(Debug, Clone)]
+pub enum AckMode {
+    InMemory,
+    Durable,
+}
+
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Success is returned after in-memory apply (`InMemory`) or after flush durability (`Durable`).
+    pub ack_mode: AckMode,
     pub flush_on_insert: bool,
     pub batch_max_ops: usize,
     pub batch_max_latency_ms: u64,
@@ -47,6 +55,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            ack_mode: AckMode::InMemory,
             flush_on_insert: true,
             batch_max_ops: 32,
             batch_max_latency_ms: 75,
@@ -318,21 +327,26 @@ async fn handle_command(
 ) -> bool {
     match cmd {
         Command::Insert { draft, resp } => {
-            let res = store
-                .insert(draft)
-                .map_err(RuntimeError::from)
-                .and_then(|(id, stored)| {
-                    let out = id;
-                    if let Some(tx) = persist_tx {
-                        enqueue_persist(tx, stored)?;
-                    } else {
-                        let _ = events_tx.send(QsoEvent::DurableUpTo {
-                            op_seq: store.latest_op_seq(),
-                        });
+            let res = match store.insert(draft) {
+                Ok((id, stored)) => {
+                    let persist_res = persist_after_mutation(
+                        persist_tx,
+                        events_tx,
+                        &config.ack_mode,
+                        store.latest_op_seq(),
+                        stored,
+                    )
+                    .await;
+                    match persist_res {
+                        Ok(()) => {
+                            let _ = events_tx.send(QsoEvent::Inserted { id });
+                            Ok(id)
+                        }
+                        Err(err) => Err(err),
                     }
-                    let _ = events_tx.send(QsoEvent::Inserted { id });
-                    Ok(out)
-                });
+                }
+                Err(err) => Err(RuntimeError::from(err)),
+            };
             if res.is_ok() {
                 *ops_since_snapshot += 1;
                 maybe_auto_checkpoint(store, persist_tx, config, ops_since_snapshot).await;
@@ -340,71 +354,95 @@ async fn handle_command(
             let _ = resp.send(res);
         }
         Command::Patch { id, patch, resp } => {
-            let res = store
-                .patch(id, patch)
-                .map_err(RuntimeError::from)
-                .and_then(|(_, stored)| {
-                    if let Some(tx) = persist_tx {
-                        enqueue_persist(tx, stored)?;
-                    } else {
-                        let _ = events_tx.send(QsoEvent::DurableUpTo {
-                            op_seq: store.latest_op_seq(),
-                        });
+            let res = match store.patch(id, patch) {
+                Ok((_, stored)) => {
+                    let persist_res = persist_after_mutation(
+                        persist_tx,
+                        events_tx,
+                        &config.ack_mode,
+                        store.latest_op_seq(),
+                        stored,
+                    )
+                    .await;
+                    match persist_res {
+                        Ok(()) => {
+                            let _ = events_tx.send(QsoEvent::Updated { id });
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
                     }
-                    let _ = events_tx.send(QsoEvent::Updated { id });
-                    Ok(())
-                });
+                }
+                Err(err) => Err(RuntimeError::from(err)),
+            };
             let _ = resp.send(res);
         }
         Command::Void { id, resp } => {
-            let res = store
-                .void(id)
-                .map_err(RuntimeError::from)
-                .and_then(|(_, stored)| {
-                    if let Some(tx) = persist_tx {
-                        enqueue_persist(tx, stored)?;
-                    } else {
-                        let _ = events_tx.send(QsoEvent::DurableUpTo {
-                            op_seq: store.latest_op_seq(),
-                        });
+            let res = match store.void(id) {
+                Ok((_, stored)) => {
+                    let persist_res = persist_after_mutation(
+                        persist_tx,
+                        events_tx,
+                        &config.ack_mode,
+                        store.latest_op_seq(),
+                        stored,
+                    )
+                    .await;
+                    match persist_res {
+                        Ok(()) => {
+                            let _ = events_tx.send(QsoEvent::Voided { id });
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
                     }
-                    let _ = events_tx.send(QsoEvent::Voided { id });
-                    Ok(())
-                });
+                }
+                Err(err) => Err(RuntimeError::from(err)),
+            };
             let _ = resp.send(res);
         }
         Command::Undo { resp } => {
-            let res = store
-                .undo()
-                .map_err(RuntimeError::from)
-                .and_then(|(_, stored)| {
-                    if let Some(tx) = persist_tx {
-                        enqueue_persist(tx, stored)?;
-                    } else {
-                        let _ = events_tx.send(QsoEvent::DurableUpTo {
-                            op_seq: store.latest_op_seq(),
-                        });
+            let res = match store.undo() {
+                Ok((_, stored)) => {
+                    let persist_res = persist_after_mutation(
+                        persist_tx,
+                        events_tx,
+                        &config.ack_mode,
+                        store.latest_op_seq(),
+                        stored,
+                    )
+                    .await;
+                    match persist_res {
+                        Ok(()) => {
+                            let _ = events_tx.send(QsoEvent::UndoApplied);
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
                     }
-                    let _ = events_tx.send(QsoEvent::UndoApplied);
-                    Ok(())
-                });
+                }
+                Err(err) => Err(RuntimeError::from(err)),
+            };
             let _ = resp.send(res);
         }
         Command::Redo { resp } => {
-            let res = store
-                .redo()
-                .map_err(RuntimeError::from)
-                .and_then(|(_, stored)| {
-                    if let Some(tx) = persist_tx {
-                        enqueue_persist(tx, stored)?;
-                    } else {
-                        let _ = events_tx.send(QsoEvent::DurableUpTo {
-                            op_seq: store.latest_op_seq(),
-                        });
+            let res = match store.redo() {
+                Ok((_, stored)) => {
+                    let persist_res = persist_after_mutation(
+                        persist_tx,
+                        events_tx,
+                        &config.ack_mode,
+                        store.latest_op_seq(),
+                        stored,
+                    )
+                    .await;
+                    match persist_res {
+                        Ok(()) => {
+                            let _ = events_tx.send(QsoEvent::RedoApplied);
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
                     }
-                    let _ = events_tx.send(QsoEvent::RedoApplied);
-                    Ok(())
-                });
+                }
+                Err(err) => Err(RuntimeError::from(err)),
+            };
             let _ = resp.send(res);
         }
         Command::Get { id, resp } => {
@@ -639,4 +677,33 @@ async fn maybe_auto_checkpoint(
 fn enqueue_persist(tx: &mpsc::Sender<PersistMsg>, stored: StoredOp) -> Result<(), RuntimeError> {
     tx.try_send(PersistMsg::Op(stored))
         .map_err(|err| RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}"))))
+}
+
+async fn persist_after_mutation(
+    persist_tx: Option<&mpsc::Sender<PersistMsg>>,
+    events_tx: &broadcast::Sender<QsoEvent>,
+    ack_mode: &AckMode,
+    latest_seq: OpSeq,
+    stored: StoredOp,
+) -> Result<(), RuntimeError> {
+    if let Some(tx) = persist_tx {
+        enqueue_persist(tx, stored)?;
+        if matches!(ack_mode, AckMode::Durable) {
+            let _ = request_flush(tx).await?;
+        }
+    } else {
+        let _ = events_tx.send(QsoEvent::DurableUpTo { op_seq: latest_seq });
+    }
+    Ok(())
+}
+
+async fn request_flush(tx: &mpsc::Sender<PersistMsg>) -> Result<OpSeq, RuntimeError> {
+    let (flush_tx, flush_rx) = oneshot::channel();
+    if tx.send(PersistMsg::Flush { resp: flush_tx }).await.is_err() {
+        return Err(RuntimeError::ChannelClosed);
+    }
+    flush_rx
+        .await
+        .map_err(|_| RuntimeError::ChannelClosed)?
+        .map_err(RuntimeError::from)
 }

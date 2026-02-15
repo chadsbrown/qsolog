@@ -264,27 +264,23 @@ impl QsoStore {
     }
 
     fn apply_patch_with_seq(&mut self, id: QsoId, patch: QsoPatch, seq: OpSeq) -> Result<(StoredOp, Op), StoreError> {
-        let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
-        let old_call = rec.callsign_norm.clone();
-        let old_contest = rec.contest_instance_id;
+        let (prev, call_changed, contest_changed) = {
+            let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+            let old_call = rec.callsign_norm.clone();
+            let old_contest = rec.contest_instance_id;
 
-        let prev = patch.capture_inverse_for(rec);
-        patch.apply_to(rec);
+            let prev = patch.capture_inverse_for(rec);
+            patch.apply_to(rec);
 
-        if rec.callsign_norm != old_call {
-            Self::remove_from_vec_index(self.by_call.entry(old_call).or_default(), id);
-            self.by_call
-                .entry(rec.callsign_norm.clone())
-                .or_default()
-                .push(id);
-        }
+            (
+                prev,
+                rec.callsign_norm != old_call,
+                rec.contest_instance_id != old_contest,
+            )
+        };
 
-        if rec.contest_instance_id != old_contest {
-            Self::remove_from_vec_index(self.by_contest.entry(old_contest).or_default(), id);
-            self.by_contest
-                .entry(rec.contest_instance_id)
-                .or_default()
-                .push(id);
+        if call_changed || contest_changed {
+            self.rebuild_secondary_indices();
         }
 
         self.bump_next_seq_from(seq);
@@ -341,9 +337,20 @@ impl QsoStore {
             .push(rec.id);
     }
 
-    fn remove_from_vec_index(v: &mut Vec<QsoId>, id: QsoId) {
-        if let Some(pos) = v.iter().position(|x| *x == id) {
-            v.remove(pos);
+    fn rebuild_secondary_indices(&mut self) {
+        self.by_call.clear();
+        self.by_contest.clear();
+        for id in &self.order {
+            if let Some(rec) = self.records.get(id) {
+                self.by_call
+                    .entry(rec.callsign_norm.clone())
+                    .or_default()
+                    .push(*id);
+                self.by_contest
+                    .entry(rec.contest_instance_id)
+                    .or_default()
+                    .push(*id);
+            }
         }
     }
 
