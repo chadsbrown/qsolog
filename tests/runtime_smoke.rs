@@ -49,6 +49,26 @@ impl OpSink for SlowSink {
     }
 }
 
+struct FailingSink {
+    append_calls: usize,
+    fail_after: usize,
+}
+
+impl OpSink for FailingSink {
+    fn append_ops(
+        &mut self,
+        ops: &[qsolog::op::StoredOp],
+    ) -> qsolog::persist::PersistResult<OpSeq> {
+        self.append_calls += 1;
+        if self.append_calls > self.fail_after {
+            return Err(qsolog::persist::PersistError::Message(
+                "forced append failure".to_string(),
+            ));
+        }
+        Ok(ops.last().map(|o| o.seq).unwrap_or(0))
+    }
+}
+
 #[tokio::test]
 async fn runtime_insert_patch_query_and_events_ordered() {
     let handle = spawn_qsolog(QsoStore::new(), None, RuntimeConfig::default());
@@ -170,6 +190,105 @@ async fn durable_ack_mode_waits_for_persistence_before_returning() {
         elapsed >= Duration::from_millis(120),
         "durable ack should wait for sink flush; elapsed={elapsed:?}"
     );
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn in_memory_ack_emits_persistence_error_and_warning_when_unhealthy() {
+    let sink = FailingSink {
+        append_calls: 0,
+        fail_after: 1,
+    };
+    let cfg = RuntimeConfig {
+        ack_mode: AckMode::InMemory,
+        flush_on_insert: true,
+        batch_max_ops: 1,
+        batch_max_latency_ms: 1,
+        persist_queue_bound: 16,
+        snapshot_every_ops: 0,
+        compact_after_snapshot: false,
+    };
+    let handle = spawn_qsolog(QsoStore::new(), Some(Box::new(sink)), cfg);
+    let mut sub = handle.subscribe();
+
+    let _ = handle.insert(draft("A1", 1)).await.expect("insert1");
+    let _ = handle.insert(draft("A2", 2)).await.expect("insert2");
+
+    let mut persistence_error_seen = false;
+    for _ in 0..10 {
+        let evt = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+            .await
+            .expect("recv")
+            .expect("event");
+        if matches!(evt, QsoEvent::PersistenceError { .. }) {
+            persistence_error_seen = true;
+            break;
+        }
+    }
+    assert!(persistence_error_seen, "expected persistence error event");
+
+    let state = handle.persistence_state().await;
+    assert!(!state.is_healthy);
+    assert!(state.last_error.is_some());
+
+    let _ = handle.insert(draft("A3", 3)).await.expect("insert3");
+    let mut warning_seen = false;
+    for _ in 0..10 {
+        let evt = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+            .await
+            .expect("recv")
+            .expect("event");
+        if matches!(evt, QsoEvent::NotDurableWarning { .. }) {
+            warning_seen = true;
+            break;
+        }
+    }
+    assert!(warning_seen, "expected non-durable warning event");
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn durable_ack_rejects_mutations_while_unhealthy() {
+    let sink = FailingSink {
+        append_calls: 0,
+        fail_after: 1,
+    };
+    let cfg = RuntimeConfig {
+        ack_mode: AckMode::Durable,
+        flush_on_insert: true,
+        batch_max_ops: 1,
+        batch_max_latency_ms: 1,
+        persist_queue_bound: 16,
+        snapshot_every_ops: 0,
+        compact_after_snapshot: false,
+    };
+    let handle = spawn_qsolog(QsoStore::new(), Some(Box::new(sink)), cfg);
+    let mut sub = handle.subscribe();
+
+    let _ = handle.insert(draft("D1", 1)).await.expect("insert1");
+    let _ = handle.insert(draft("D2", 2)).await.expect("insert2");
+
+    let mut persistence_error_seen = false;
+    for _ in 0..10 {
+        let evt = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+            .await
+            .expect("recv")
+            .expect("event");
+        if matches!(evt, QsoEvent::PersistenceError { .. }) {
+            persistence_error_seen = true;
+            break;
+        }
+    }
+    assert!(persistence_error_seen, "expected persistence error event");
+
+    let err = handle.insert(draft("D3", 3)).await.expect_err("insert should fail");
+    assert!(matches!(err, RuntimeError::PersistenceUnhealthy(_)));
+
+    let state = handle.persistence_state().await;
+    assert!(!state.is_healthy);
+    assert!(state.last_error.is_some());
 
     handle.shutdown().await.expect("shutdown");
 }

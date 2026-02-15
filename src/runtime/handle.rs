@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    sync::{Mutex, broadcast, mpsc, oneshot},
+    sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
     time::{Duration, Instant},
 };
 
@@ -26,6 +26,8 @@ pub enum RuntimeError {
     Persist(PersistError),
     /// Internal channel closed unexpectedly.
     ChannelClosed,
+    /// Persistence is unhealthy and current ack policy requires durability.
+    PersistenceUnhealthy(String),
 }
 
 impl From<StoreError> for RuntimeError {
@@ -86,6 +88,7 @@ impl Default for RuntimeConfig {
 pub struct QsoLogHandle {
     cmd_tx: mpsc::Sender<Command>,
     events_tx: broadcast::Sender<QsoEvent>,
+    persistence_state: Arc<RwLock<PersistenceState>>,
 }
 
 impl Clone for QsoLogHandle {
@@ -93,6 +96,28 @@ impl Clone for QsoLogHandle {
         Self {
             cmd_tx: self.cmd_tx.clone(),
             events_tx: self.events_tx.clone(),
+            persistence_state: Arc::clone(&self.persistence_state),
+        }
+    }
+}
+
+/// Snapshot of persistence health as seen by the runtime.
+#[derive(Debug, Clone)]
+pub struct PersistenceState {
+    /// Whether persistence is currently considered healthy.
+    pub is_healthy: bool,
+    /// Last operation sequence known durable.
+    pub last_durable_seq: OpSeq,
+    /// Last persistence error message, if any.
+    pub last_error: Option<String>,
+}
+
+impl Default for PersistenceState {
+    fn default() -> Self {
+        Self {
+            is_healthy: true,
+            last_durable_seq: 0,
+            last_error: None,
         }
     }
 }
@@ -175,6 +200,8 @@ pub fn spawn_qsolog(
     };
 
     let events_tx_loop = events_tx.clone();
+    let persistence_state = Arc::new(RwLock::new(PersistenceState::default()));
+    let persistence_state_loop = Arc::clone(&persistence_state);
 
     tokio::spawn(async move {
         let mut store = store;
@@ -192,6 +219,7 @@ pub fn spawn_qsolog(
                             persist_tx_opt.as_ref(),
                             &config,
                             &mut ops_since_snapshot,
+                            &persistence_state_loop,
                         ).await;
 
                         if done {
@@ -200,7 +228,25 @@ pub fn spawn_qsolog(
                     }
                     durable = rx.recv() => {
                         if let Some(Ok(op_seq)) = durable {
+                            {
+                                let mut state = persistence_state_loop.write().await;
+                                state.is_healthy = true;
+                                state.last_durable_seq = state.last_durable_seq.max(op_seq);
+                                state.last_error = None;
+                            }
                             let _ = events_tx_loop.send(QsoEvent::DurableUpTo { op_seq });
+                        } else if let Some(Err(err)) = durable {
+                            let msg = format!("{err:?}");
+                            let last_durable_seq = {
+                                let mut state = persistence_state_loop.write().await;
+                                state.is_healthy = false;
+                                state.last_error = Some(msg.clone());
+                                state.last_durable_seq
+                            };
+                            let _ = events_tx_loop.send(QsoEvent::PersistenceError {
+                                error: msg,
+                                last_durable_seq,
+                            });
                         }
                     }
                 }
@@ -215,6 +261,7 @@ pub fn spawn_qsolog(
                     persist_tx_opt.as_ref(),
                     &config,
                     &mut ops_since_snapshot,
+                    &persistence_state_loop,
                 )
                 .await;
                 if done {
@@ -224,10 +271,19 @@ pub fn spawn_qsolog(
         }
     });
 
-    QsoLogHandle { cmd_tx, events_tx }
+    QsoLogHandle {
+        cmd_tx,
+        events_tx,
+        persistence_state,
+    }
 }
 
 impl QsoLogHandle {
+    /// Returns the latest observed persistence health.
+    pub async fn persistence_state(&self) -> PersistenceState {
+        self.persistence_state.read().await.clone()
+    }
+
     /// Subscribes to runtime events.
     pub fn subscribe(&self) -> broadcast::Receiver<QsoEvent> {
         self.events_tx.subscribe()
@@ -362,15 +418,21 @@ async fn handle_command(
     persist_tx: Option<&mpsc::Sender<PersistMsg>>,
     config: &RuntimeConfig,
     ops_since_snapshot: &mut usize,
+    persistence_state: &Arc<RwLock<PersistenceState>>,
 ) -> bool {
     match cmd {
         Command::Insert { draft, resp } => {
+            if let Err(err) = ensure_mutation_allowed(&config.ack_mode, persistence_state).await {
+                let _ = resp.send(Err(err));
+                return false;
+            }
             let res = match store.insert(draft) {
                 Ok((id, stored)) => {
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
+                        persistence_state,
                         store.latest_op_seq(),
                         stored,
                     )
@@ -392,12 +454,17 @@ async fn handle_command(
             let _ = resp.send(res);
         }
         Command::Patch { id, patch, resp } => {
+            if let Err(err) = ensure_mutation_allowed(&config.ack_mode, persistence_state).await {
+                let _ = resp.send(Err(err));
+                return false;
+            }
             let res = match store.patch(id, patch) {
                 Ok((_, stored)) => {
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
+                        persistence_state,
                         store.latest_op_seq(),
                         stored,
                     )
@@ -415,12 +482,17 @@ async fn handle_command(
             let _ = resp.send(res);
         }
         Command::Void { id, resp } => {
+            if let Err(err) = ensure_mutation_allowed(&config.ack_mode, persistence_state).await {
+                let _ = resp.send(Err(err));
+                return false;
+            }
             let res = match store.void(id) {
                 Ok((_, stored)) => {
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
+                        persistence_state,
                         store.latest_op_seq(),
                         stored,
                     )
@@ -438,12 +510,17 @@ async fn handle_command(
             let _ = resp.send(res);
         }
         Command::Undo { resp } => {
+            if let Err(err) = ensure_mutation_allowed(&config.ack_mode, persistence_state).await {
+                let _ = resp.send(Err(err));
+                return false;
+            }
             let res = match store.undo() {
                 Ok((_, stored)) => {
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
+                        persistence_state,
                         store.latest_op_seq(),
                         stored,
                     )
@@ -461,12 +538,17 @@ async fn handle_command(
             let _ = resp.send(res);
         }
         Command::Redo { resp } => {
+            if let Err(err) = ensure_mutation_allowed(&config.ack_mode, persistence_state).await {
+                let _ = resp.send(Err(err));
+                return false;
+            }
             let res = match store.redo() {
                 Ok((_, stored)) => {
                     let persist_res = persist_after_mutation(
                         persist_tx,
                         events_tx,
                         &config.ack_mode,
+                        persistence_state,
                         store.latest_op_seq(),
                         stored,
                     )
@@ -714,27 +796,70 @@ async fn maybe_auto_checkpoint(
 
 fn enqueue_persist(tx: &mpsc::Sender<PersistMsg>, stored: StoredOp) -> Result<(), RuntimeError> {
     tx.try_send(PersistMsg::Op(Box::new(stored)))
-        .map_err(|err| {
-            RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}")))
-        })
+        .map_err(|err| RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}"))))
 }
 
 async fn persist_after_mutation(
     persist_tx: Option<&mpsc::Sender<PersistMsg>>,
     events_tx: &broadcast::Sender<QsoEvent>,
     ack_mode: &AckMode,
+    persistence_state: &Arc<RwLock<PersistenceState>>,
     latest_seq: OpSeq,
     stored: StoredOp,
 ) -> Result<(), RuntimeError> {
     if let Some(tx) = persist_tx {
-        enqueue_persist(tx, stored)?;
+        if let Err(err) = enqueue_persist(tx, stored) {
+            mark_persist_unhealthy(events_tx, persistence_state, &format!("{err:?}")).await;
+            return Err(err);
+        }
         if matches!(ack_mode, AckMode::Durable) {
-            let _ = request_flush(tx).await?;
+            if let Err(err) = request_flush(tx).await {
+                mark_persist_unhealthy(events_tx, persistence_state, &format!("{err:?}")).await;
+                return Err(err);
+            }
+        } else if !persistence_state.read().await.is_healthy {
+            let _ = events_tx.send(QsoEvent::NotDurableWarning { op_seq: latest_seq });
         }
     } else {
         let _ = events_tx.send(QsoEvent::DurableUpTo { op_seq: latest_seq });
     }
     Ok(())
+}
+
+async fn ensure_mutation_allowed(
+    ack_mode: &AckMode,
+    persistence_state: &Arc<RwLock<PersistenceState>>,
+) -> Result<(), RuntimeError> {
+    if !matches!(ack_mode, AckMode::Durable) {
+        return Ok(());
+    }
+    let state = persistence_state.read().await.clone();
+    if state.is_healthy {
+        Ok(())
+    } else {
+        Err(RuntimeError::PersistenceUnhealthy(
+            state
+                .last_error
+                .unwrap_or_else(|| "persistence unhealthy".to_string()),
+        ))
+    }
+}
+
+async fn mark_persist_unhealthy(
+    events_tx: &broadcast::Sender<QsoEvent>,
+    persistence_state: &Arc<RwLock<PersistenceState>>,
+    error: &str,
+) {
+    let last_durable_seq = {
+        let mut state = persistence_state.write().await;
+        state.is_healthy = false;
+        state.last_error = Some(error.to_string());
+        state.last_durable_seq
+    };
+    let _ = events_tx.send(QsoEvent::PersistenceError {
+        error: error.to_string(),
+        last_durable_seq,
+    });
 }
 
 async fn request_flush(tx: &mpsc::Sender<PersistMsg>) -> Result<OpSeq, RuntimeError> {
