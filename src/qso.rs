@@ -1,70 +1,117 @@
+//! QSO domain record, draft, flags, and patch types.
+
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Band, ContestInstanceId, OperatorId, QsoId, RadioId};
 
+/// Opaque serialized exchange payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExchangeBlob {
+    /// Raw exchange bytes.
     pub bytes: Vec<u8>,
 }
 
+/// Record flags that affect scoring and visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct QsoFlags {
+    /// True when the QSO is voided.
     pub is_void: bool,
+    /// True when a dupe should still score.
     pub dupe_override: bool,
 }
 
+/// Fully materialized, authoritative QSO record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QsoRecord {
+    /// Stable QSO identifier.
     pub id: QsoId,
+    /// Contest instance to which this QSO belongs.
     pub contest_instance_id: ContestInstanceId,
+    /// Operator-entered callsign text.
     pub callsign_raw: String,
+    /// Normalized callsign used for indexing/scoring.
     pub callsign_norm: String,
+    /// Band bucket.
     pub band: Band,
+    /// Mode bucket.
     pub mode: crate::types::Mode,
+    /// Frequency in Hz.
     pub freq_hz: u64,
+    /// Timestamp in milliseconds since epoch.
     pub ts_ms: u64,
+    /// Radio identifier.
     pub radio_id: RadioId,
+    /// Operator identifier.
     pub operator_id: OperatorId,
+    /// Opaque exchange content.
     pub exchange: ExchangeBlob,
+    /// Record flags.
     pub flags: QsoFlags,
 }
 
+/// Insert payload used to create a new [`QsoRecord`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QsoDraft {
+    /// Contest instance to which this QSO belongs.
     pub contest_instance_id: ContestInstanceId,
+    /// Operator-entered callsign text.
     pub callsign_raw: String,
+    /// Normalized callsign used for indexing/scoring.
     pub callsign_norm: String,
+    /// Band bucket.
     pub band: Band,
+    /// Mode bucket.
     pub mode: crate::types::Mode,
+    /// Frequency in Hz.
     pub freq_hz: u64,
+    /// Timestamp in milliseconds since epoch.
     pub ts_ms: u64,
+    /// Radio identifier.
     pub radio_id: RadioId,
+    /// Operator identifier.
     pub operator_id: OperatorId,
+    /// Opaque exchange content.
     pub exchange: ExchangeBlob,
+    /// Record flags.
     pub flags: QsoFlags,
 }
 
+/// Sparse patch where each `Some` field overwrites the record value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct QsoPatch {
+    /// Optional replacement for contest instance id.
     pub contest_instance_id: Option<ContestInstanceId>,
+    /// Optional replacement for raw callsign.
     pub callsign_raw: Option<String>,
+    /// Optional replacement for normalized callsign.
     pub callsign_norm: Option<String>,
+    /// Optional replacement for band.
     pub band: Option<Band>,
+    /// Optional replacement for mode.
     pub mode: Option<crate::types::Mode>,
+    /// Optional replacement for frequency.
     pub freq_hz: Option<u64>,
+    /// Optional replacement for timestamp.
     pub ts_ms: Option<u64>,
+    /// Optional replacement for radio id.
     pub radio_id: Option<RadioId>,
+    /// Optional replacement for operator id.
     pub operator_id: Option<OperatorId>,
+    /// Optional replacement for exchange.
     pub exchange: Option<ExchangeBlob>,
+    /// Optional replacement for void flag.
     pub is_void: Option<bool>,
+    /// Optional replacement for dupe override flag.
     pub dupe_override: Option<bool>,
 }
 
 impl QsoPatch {
+    /// Returns true when no fields are set.
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
 
+    /// Captures an inverse patch for all fields present in `self`.
     pub fn capture_inverse_for(&self, rec: &QsoRecord) -> Self {
         Self {
             contest_instance_id: self.contest_instance_id.map(|_| rec.contest_instance_id),
@@ -85,6 +132,7 @@ impl QsoPatch {
         }
     }
 
+    /// Applies this patch in place to `rec`.
     pub fn apply_to(&self, rec: &mut QsoRecord) {
         if let Some(v) = self.contest_instance_id {
             rec.contest_instance_id = v;

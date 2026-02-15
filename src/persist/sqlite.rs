@@ -1,3 +1,5 @@
+//! SQLite-backed append-only op journal sink.
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,16 +22,21 @@ struct SnapshotEnvelope {
     snapshot: StoreSnapshotV1,
 }
 
+/// SQLite implementation of [`crate::persist::OpSink`].
 pub struct SqliteOpSink {
     conn: Connection,
 }
 
 impl SqliteOpSink {
+    /// Opens or creates a SQLite-backed sink at `path`.
+    ///
+    /// Enables WAL mode and sets `synchronous=NORMAL`.
     pub fn open(path: impl AsRef<Path>) -> PersistResult<Self> {
         let conn = Connection::open(path)?;
         Self::init_connection(conn)
     }
 
+    /// Opens an in-memory SQLite sink.
     pub fn open_in_memory() -> PersistResult<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init_connection(conn)
@@ -42,6 +49,7 @@ impl SqliteOpSink {
         Ok(Self { conn })
     }
 
+    /// Loads store state from latest snapshot plus tail events.
     pub fn load_store(&self) -> PersistResult<QsoStore> {
         let mut store = if let Some(snapshot) = self.load_latest_snapshot()? {
             QsoStore::from_snapshot(snapshot)?
@@ -57,6 +65,7 @@ impl SqliteOpSink {
         Ok(store)
     }
 
+    /// Loads events strictly after `seq`.
     pub fn load_events_after(&self, seq: OpSeq) -> PersistResult<Vec<StoredOp>> {
         let mut stmt = self
             .conn
@@ -85,6 +94,7 @@ impl SqliteOpSink {
         Ok(out)
     }
 
+    /// Writes a snapshot covering `last_seq`.
     pub fn write_snapshot(
         &mut self,
         snapshot: &StoreSnapshotV1,
@@ -103,6 +113,7 @@ impl SqliteOpSink {
         Ok(())
     }
 
+    /// Deletes events up to and including `seq`.
     pub fn compact_through(&mut self, seq: OpSeq) -> PersistResult<usize> {
         let count = self
             .conn
@@ -110,6 +121,7 @@ impl SqliteOpSink {
         Ok(count)
     }
 
+    /// Returns the latest sequence persisted in the events table.
     pub fn latest_seq(&self) -> PersistResult<OpSeq> {
         let seq: Option<i64> = self
             .conn

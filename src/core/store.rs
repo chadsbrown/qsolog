@@ -1,3 +1,10 @@
+//! Authoritative in-memory QSO store.
+//!
+//! Invariants:
+//! - insertion order is canonical and never reorders
+//! - every mutating API emits a [`StoredOp`] for journaling
+//! - undo/redo are implemented via compensating operations
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hashbrown::HashMap;
@@ -9,22 +16,33 @@ use crate::{
     types::{ContestInstanceId, OpSeq, QsoId},
 };
 
+/// Error type for in-memory store operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
+    /// Referenced QSO id does not exist.
     MissingQso(QsoId),
+    /// Insert attempted for an id that already exists.
     AlreadyExists(QsoId),
+    /// Undo stack is empty.
     NothingToUndo,
+    /// Redo stack is empty.
     NothingToRedo,
 }
 
+/// Serializable store snapshot for checkpointing/replay bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreSnapshotV1 {
+    /// Next ID to assign on insert.
     pub next_qso_id: QsoId,
+    /// Next op sequence to assign.
     pub next_op_seq: OpSeq,
+    /// Canonical insertion-order id list.
     pub order: Vec<QsoId>,
+    /// Record set.
     pub records: Vec<QsoRecord>,
 }
 
+/// Authoritative mutable QSO store.
 #[derive(Debug, Default)]
 pub struct QsoStore {
     records: HashMap<QsoId, QsoRecord>,
@@ -40,6 +58,7 @@ pub struct QsoStore {
 }
 
 impl QsoStore {
+    /// Creates an empty store.
     pub fn new() -> Self {
         Self {
             next_op_seq: 1,
@@ -48,6 +67,7 @@ impl QsoStore {
         }
     }
 
+    /// Restores store state from a snapshot.
     pub fn from_snapshot(snapshot: StoreSnapshotV1) -> Result<Self, StoreError> {
         let mut store = Self {
             next_qso_id: snapshot.next_qso_id,
@@ -68,6 +88,7 @@ impl QsoStore {
         Ok(store)
     }
 
+    /// Exports a snapshot suitable for persistence.
     pub fn export_snapshot(&self) -> StoreSnapshotV1 {
         let records = self
             .order
@@ -83,6 +104,7 @@ impl QsoStore {
         }
     }
 
+    /// Inserts a new QSO and returns `(id, stored_op)`.
     pub fn insert(&mut self, draft: QsoDraft) -> Result<(QsoId, StoredOp), StoreError> {
         let id = self.next_qso_id;
         self.next_qso_id += 1;
@@ -109,6 +131,7 @@ impl QsoStore {
         Ok((id, stored))
     }
 
+    /// Applies a patch to an existing QSO and returns the emitted op.
     pub fn patch(&mut self, id: QsoId, patch: QsoPatch) -> Result<((), StoredOp), StoreError> {
         let (stored, inverse) = self.apply_patch(id, patch)?;
         self.undo.push(inverse);
@@ -117,6 +140,7 @@ impl QsoStore {
         Ok(((), stored))
     }
 
+    /// Toggles void status for a QSO and returns the emitted op.
     pub fn void(&mut self, id: QsoId) -> Result<((), StoredOp), StoreError> {
         let prev_is_void = self
             .records
@@ -131,6 +155,7 @@ impl QsoStore {
         Ok(((), stored))
     }
 
+    /// Applies one undo step and returns the compensating op.
     pub fn undo(&mut self) -> Result<((), StoredOp), StoreError> {
         let op = self.undo.pop().ok_or(StoreError::NothingToUndo)?;
         let (stored, inverse) = self.apply_op(op)?;
@@ -139,6 +164,7 @@ impl QsoStore {
         Ok(((), stored))
     }
 
+    /// Applies one redo step and returns the compensating op.
     pub fn redo(&mut self) -> Result<((), StoredOp), StoreError> {
         let op = self.redo.pop().ok_or(StoreError::NothingToRedo)?;
         let (stored, inverse) = self.apply_op(op)?;
@@ -147,6 +173,9 @@ impl QsoStore {
         Ok(((), stored))
     }
 
+    /// Applies a stored operation during journal replay.
+    ///
+    /// Replay mode intentionally clears undo/redo stacks.
     pub fn apply_replayed_op(&mut self, stored: StoredOp) -> Result<(), StoreError> {
         let seq = stored.seq;
         let op = stored.op;
@@ -166,14 +195,17 @@ impl QsoStore {
         Ok(())
     }
 
+    /// Returns a record reference by id.
     pub fn get(&self, id: QsoId) -> Option<&QsoRecord> {
         self.records.get(&id)
     }
 
+    /// Returns a cloned record by id.
     pub fn get_cloned(&self, id: QsoId) -> Option<QsoRecord> {
         self.get(id).cloned()
     }
 
+    /// Returns up to `n` most-recent records in insertion order.
     pub fn recent(&self, n: usize) -> Vec<&QsoRecord> {
         let len = self.order.len();
         let start = len.saturating_sub(n);
@@ -183,10 +215,12 @@ impl QsoStore {
             .collect()
     }
 
+    /// Cloning variant of [`Self::recent`].
     pub fn recent_cloned(&self, n: usize) -> Vec<QsoRecord> {
         self.recent(n).into_iter().cloned().collect()
     }
 
+    /// Returns all records for a normalized callsign in insertion order.
     pub fn by_call(&self, call_norm: &str) -> Vec<&QsoRecord> {
         self.by_call
             .get(call_norm)
@@ -196,26 +230,32 @@ impl QsoStore {
             .collect()
     }
 
+    /// Cloning variant of [`Self::by_call`].
     pub fn by_call_cloned(&self, call_norm: &str) -> Vec<QsoRecord> {
         self.by_call(call_norm).into_iter().cloned().collect()
     }
 
+    /// Returns canonical insertion-order ids.
     pub fn ordered_ids(&self) -> &[QsoId] {
         &self.order
     }
 
+    /// Drains pending emitted ops for persistence.
     pub fn drain_pending_ops(&mut self) -> Vec<StoredOp> {
         std::mem::take(&mut self.pending_ops)
     }
 
+    /// Number of undo entries.
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
 
+    /// Number of redo entries.
     pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
 
+    /// Latest emitted sequence number, or 0 when none.
     pub fn latest_op_seq(&self) -> OpSeq {
         self.next_op_seq.saturating_sub(1)
     }

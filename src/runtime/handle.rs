@@ -1,3 +1,5 @@
+//! Single-writer runtime handle and persistence worker orchestration.
+
 use std::sync::Arc;
 
 use tokio::{
@@ -15,10 +17,14 @@ use crate::{
 
 use super::events::QsoEvent;
 
+/// Runtime command error.
 #[derive(Debug)]
 pub enum RuntimeError {
+    /// In-memory store error.
     Store(StoreError),
+    /// Persistence-layer error.
     Persist(PersistError),
+    /// Internal channel closed unexpectedly.
     ChannelClosed,
 }
 
@@ -34,21 +40,31 @@ impl From<PersistError> for RuntimeError {
     }
 }
 
+/// Mutation acknowledgment policy.
 #[derive(Debug, Clone)]
 pub enum AckMode {
+    /// Return success once in-memory apply (and queueing) is complete.
     InMemory,
+    /// Return success only after persistence flush confirms durability.
     Durable,
 }
 
+/// Runtime tuning and durability configuration.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     /// Success is returned after in-memory apply (`InMemory`) or after flush durability (`Durable`).
     pub ack_mode: AckMode,
+    /// If true, insert-heavy batches trigger immediate flush in worker.
     pub flush_on_insert: bool,
+    /// Maximum ops per persistence batch.
     pub batch_max_ops: usize,
+    /// Maximum delay before flushing a non-empty batch.
     pub batch_max_latency_ms: u64,
+    /// Bounded queue capacity from runtime loop to persistence worker.
     pub persist_queue_bound: usize,
+    /// Auto-checkpoint interval in applied ops (`0` disables).
     pub snapshot_every_ops: usize,
+    /// If true, compact events through checkpoint sequence.
     pub compact_after_snapshot: bool,
 }
 
@@ -66,6 +82,7 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Cloneable runtime API handle.
 pub struct QsoLogHandle {
     cmd_tx: mpsc::Sender<Command>,
     events_tx: broadcast::Sender<QsoEvent>,
@@ -139,6 +156,7 @@ enum PersistMsg {
     },
 }
 
+/// Spawns the single-writer runtime loop and optional persistence worker.
 pub fn spawn_qsolog(
     store: QsoStore,
     sink: Option<Box<dyn OpSink>>,
@@ -210,10 +228,12 @@ pub fn spawn_qsolog(
 }
 
 impl QsoLogHandle {
+    /// Subscribes to runtime events.
     pub fn subscribe(&self) -> broadcast::Receiver<QsoEvent> {
         self.events_tx.subscribe()
     }
 
+    /// Inserts a new QSO and returns its assigned id.
     pub async fn insert(&self, draft: QsoDraft) -> Result<crate::types::QsoId, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -223,6 +243,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Applies a patch to an existing QSO.
     pub async fn patch(
         &self,
         id: crate::types::QsoId,
@@ -240,6 +261,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Toggles void status for a QSO.
     pub async fn void(&self, id: crate::types::QsoId) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -249,6 +271,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Applies one undo step.
     pub async fn undo(&self) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -258,6 +281,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Applies one redo step.
     pub async fn redo(&self) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -267,6 +291,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Fetches one record by id.
     pub async fn get(&self, id: crate::types::QsoId) -> Result<Option<QsoRecord>, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -276,6 +301,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)
     }
 
+    /// Returns up to `n` most-recent records.
     pub async fn recent(&self, n: usize) -> Result<Vec<QsoRecord>, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -285,6 +311,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)
     }
 
+    /// Returns records matching a normalized callsign.
     pub async fn by_call(&self, call: impl Into<String>) -> Result<Vec<QsoRecord>, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -297,6 +324,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)
     }
 
+    /// Forces persistence flush and returns durable sequence.
     pub async fn flush(&self) -> Result<OpSeq, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -306,6 +334,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Triggers an explicit snapshot checkpoint.
     pub async fn checkpoint(&self) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -315,6 +344,7 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
+    /// Shuts down runtime and persistence worker.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

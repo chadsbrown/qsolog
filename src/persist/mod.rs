@@ -1,11 +1,18 @@
+//! Persistence abstractions and sink implementations.
+
+/// SQLite sink implementation.
 pub mod sqlite;
 
 use crate::{core::store::StoreSnapshotV1, op::StoredOp, types::OpSeq};
 
+/// Persistence-layer error type.
 #[derive(Debug)]
 pub enum PersistError {
+    /// Wrapped SQLite error.
     Sqlite(rusqlite::Error),
+    /// Wrapped serialization error.
     Serde(serde_json::Error),
+    /// Generic message error.
     Message(String),
 }
 
@@ -27,13 +34,18 @@ impl From<crate::core::store::StoreError> for PersistError {
     }
 }
 
+/// Result alias for persistence operations.
 pub type PersistResult<T> = Result<T, PersistError>;
 
+/// Append-only operation sink abstraction.
 pub trait OpSink: Send {
+    /// Appends one batch of operations and returns durable sequence.
     fn append_ops(&mut self, ops: &[StoredOp]) -> PersistResult<OpSeq>;
+    /// Flushes any buffered durability work.
     fn flush(&mut self) -> PersistResult<()> {
         Ok(())
     }
+    /// Writes a snapshot with the given last covered sequence.
     fn write_snapshot(
         &mut self,
         _snapshot: &StoreSnapshotV1,
@@ -41,6 +53,7 @@ pub trait OpSink: Send {
     ) -> PersistResult<()> {
         Ok(())
     }
+    /// Compacts journal data through `seq`.
     fn compact_through(&mut self, _seq: OpSeq) -> PersistResult<usize> {
         Ok(0)
     }

@@ -1,3 +1,5 @@
+//! Incremental projector that applies engine invalidations by dependency keys.
+
 use std::collections::VecDeque;
 
 use hashbrown::{HashMap, HashSet};
@@ -11,11 +13,14 @@ use crate::{
 
 use super::traits::{ContestEngine, DepKey, EngineApplied};
 
+/// Projector update errors.
 #[derive(Debug)]
 pub enum ProjectorError {
+    /// Referenced QSO id was missing from the store.
     MissingQso(QsoId),
 }
 
+/// Keeps incremental engine results aligned with authoritative store mutations.
 pub struct Projector<E: ContestEngine> {
     engine: E,
     state: E::State,
@@ -24,6 +29,7 @@ pub struct Projector<E: ContestEngine> {
 }
 
 impl<E: ContestEngine> Projector<E> {
+    /// Creates a new projector with fresh engine state.
     pub fn new(engine: E) -> Self {
         let state = engine.new_state();
         Self {
@@ -34,10 +40,14 @@ impl<E: ContestEngine> Projector<E> {
         }
     }
 
+    /// Returns cached applied outputs keyed by QSO id.
     pub fn applied(&self) -> &HashMap<QsoId, EngineApplied<E::Eval>> {
         &self.applied
     }
 
+    /// Applies one stored operation and updates incremental engine caches.
+    ///
+    /// Re-evaluation always processes impacted records in canonical insertion order.
     pub fn apply_stored_op(
         &mut self,
         store: &QsoStore,
