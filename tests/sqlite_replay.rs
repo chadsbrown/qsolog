@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 use qsolog::{
@@ -136,4 +137,84 @@ fn replay_from_snapshot_plus_tail_events_matches_exact_state() {
         replayed.export_snapshot().records,
         store.export_snapshot().records
     );
+}
+
+#[test]
+fn open_migrates_or_initializes_meta_versions() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_path = tmp.path().join("meta_init.db");
+
+    let conn = Connection::open(&db_path).expect("open");
+    conn.execute_batch(include_str!("../src/persist/schema.sql"))
+        .expect("schema");
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('schema_version', '0')",
+        [],
+    )
+    .expect("insert meta");
+    drop(conn);
+
+    let _sink = SqliteOpSink::open(&db_path).expect("open with migration");
+
+    let check = Connection::open(&db_path).expect("reopen");
+    let schema: String = check
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("schema version");
+    let op_fmt: String = check
+        .query_row(
+            "SELECT value FROM meta WHERE key='op_format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("op format");
+    let snap_fmt: String = check
+        .query_row(
+            "SELECT value FROM meta WHERE key='snapshot_format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("snapshot format");
+    let station_id: String = check
+        .query_row(
+            "SELECT value FROM meta WHERE key='station_instance_id'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("station id");
+
+    assert_eq!(schema, "1");
+    assert!(!op_fmt.is_empty());
+    assert!(!snap_fmt.is_empty());
+    assert_eq!(station_id, "local");
+}
+
+#[test]
+fn open_fails_on_unsupported_schema_version() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_path = tmp.path().join("meta_bad.db");
+
+    let conn = Connection::open(&db_path).expect("open");
+    conn.execute_batch(include_str!("../src/persist/schema.sql"))
+        .expect("schema");
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('schema_version', '999')",
+        [],
+    )
+    .expect("insert meta");
+    drop(conn);
+
+    let err = match SqliteOpSink::open(&db_path) {
+        Ok(_) => panic!("should fail"),
+        Err(err) => err,
+    };
+    match err {
+        qsolog::persist::PersistError::Message(msg) => {
+            assert!(msg.contains("unsupported schema version"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

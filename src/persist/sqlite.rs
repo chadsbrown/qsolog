@@ -14,7 +14,12 @@ use crate::{
 
 use super::{OpSink, PersistError, PersistResult};
 
+const DB_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const META_SCHEMA_VERSION: &str = "schema_version";
+const META_OP_FORMAT_VERSION: &str = "op_format_version";
+const META_SNAPSHOT_FORMAT_VERSION: &str = "snapshot_format_version";
+const META_STATION_INSTANCE_ID: &str = "station_instance_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotEnvelope {
@@ -44,6 +49,7 @@ impl SqliteOpSink {
 
     fn init_connection(conn: Connection) -> PersistResult<Self> {
         conn.execute_batch(include_str!("schema.sql"))?;
+        initialize_or_migrate_meta(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(Self { conn })
@@ -225,4 +231,109 @@ fn decode_stored_op_payload(payload: &[u8]) -> Result<StoredOp, String> {
     // Backward-compatible path for older payloads that stored raw StoredOp.
     serde_json::from_slice::<StoredOp>(payload)
         .map_err(|e| format!("op payload decode failed: {e}"))
+}
+
+fn initialize_or_migrate_meta(conn: &Connection) -> PersistResult<()> {
+    let current = read_u32_meta(conn, META_SCHEMA_VERSION)?;
+    match current {
+        None => {
+            write_meta(conn, META_SCHEMA_VERSION, &DB_SCHEMA_VERSION.to_string())?;
+            write_meta(
+                conn,
+                META_OP_FORMAT_VERSION,
+                &crate::op::OP_FORMAT_VERSION.to_string(),
+            )?;
+            write_meta(
+                conn,
+                META_SNAPSHOT_FORMAT_VERSION,
+                &SNAPSHOT_FORMAT_VERSION.to_string(),
+            )?;
+            write_meta(conn, META_STATION_INSTANCE_ID, "local")?;
+        }
+        Some(found) if found == DB_SCHEMA_VERSION => {
+            ensure_meta_defaults(conn)?;
+        }
+        Some(found) if found < DB_SCHEMA_VERSION => {
+            migrate_schema(conn, found, DB_SCHEMA_VERSION)?;
+            write_meta(conn, META_SCHEMA_VERSION, &DB_SCHEMA_VERSION.to_string())?;
+            ensure_meta_defaults(conn)?;
+        }
+        Some(found) => {
+            return Err(PersistError::Message(format!(
+                "unsupported schema version: {found}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn migrate_schema(conn: &Connection, from: u32, to: u32) -> PersistResult<()> {
+    if from == to {
+        return Ok(());
+    }
+    // v1 currently uses a single schema. Future migrations should be applied stepwise here.
+    conn.execute_batch(include_str!("schema.sql"))?;
+    Ok(())
+}
+
+fn ensure_meta_defaults(conn: &Connection) -> PersistResult<()> {
+    if let Some(found) = read_u32_meta(conn, META_OP_FORMAT_VERSION)? {
+        if found > u32::from(crate::op::OP_FORMAT_VERSION) {
+            return Err(PersistError::Message(format!(
+                "unsupported op format version: {found}"
+            )));
+        }
+    } else {
+        write_meta(
+            conn,
+            META_OP_FORMAT_VERSION,
+            &crate::op::OP_FORMAT_VERSION.to_string(),
+        )?;
+    }
+    if let Some(found) = read_u32_meta(conn, META_SNAPSHOT_FORMAT_VERSION)? {
+        if found > u32::from(SNAPSHOT_FORMAT_VERSION) {
+            return Err(PersistError::Message(format!(
+                "unsupported snapshot format version: {found}"
+            )));
+        }
+    } else {
+        write_meta(
+            conn,
+            META_SNAPSHOT_FORMAT_VERSION,
+            &SNAPSHOT_FORMAT_VERSION.to_string(),
+        )?;
+    }
+    if read_meta(conn, META_STATION_INSTANCE_ID)?.is_none() {
+        write_meta(conn, META_STATION_INSTANCE_ID, "local")?;
+    }
+    Ok(())
+}
+
+fn read_meta(conn: &Connection, key: &str) -> PersistResult<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+fn read_u32_meta(conn: &Connection, key: &str) -> PersistResult<Option<u32>> {
+    let Some(raw) = read_meta(conn, key)? else {
+        return Ok(None);
+    };
+    raw.parse::<u32>()
+        .map(Some)
+        .map_err(|e| PersistError::Message(format!("invalid meta value for {key}: {raw} ({e})")))
+}
+
+fn write_meta(conn: &Connection, key: &str, value: &str) -> PersistResult<()> {
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }

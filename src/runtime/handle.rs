@@ -796,7 +796,9 @@ async fn maybe_auto_checkpoint(
 
 fn enqueue_persist(tx: &mpsc::Sender<PersistMsg>, stored: StoredOp) -> Result<(), RuntimeError> {
     tx.try_send(PersistMsg::Op(Box::new(stored)))
-        .map_err(|err| RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}"))))
+        .map_err(|err| {
+            RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}")))
+        })
 }
 
 async fn persist_after_mutation(

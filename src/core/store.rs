@@ -313,7 +313,7 @@ impl QsoStore {
         patch: QsoPatch,
         seq: OpSeq,
     ) -> Result<(StoredOp, Op), StoreError> {
-        let (prev, call_changed, contest_changed) = {
+        let (prev, old_call, old_contest, new_call, new_contest) = {
             let rec = self
                 .records
                 .get_mut(&id)
@@ -326,14 +326,21 @@ impl QsoStore {
 
             (
                 prev,
-                rec.callsign_norm != old_call,
-                rec.contest_instance_id != old_contest,
+                old_call,
+                old_contest,
+                rec.callsign_norm.clone(),
+                rec.contest_instance_id,
             )
         };
 
-        if call_changed || contest_changed {
-            self.rebuild_secondary_indices();
+        if old_call != new_call {
+            self.update_call_index(id, &old_call, &new_call);
         }
+        if old_contest != new_contest {
+            self.update_contest_index(id, old_contest, new_contest);
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_indices_consistent();
 
         self.bump_next_seq_from(seq);
         let stored = StoredOp {
@@ -397,20 +404,65 @@ impl QsoStore {
             .push(rec.id);
     }
 
-    fn rebuild_secondary_indices(&mut self) {
-        self.by_call.clear();
-        self.by_contest.clear();
-        for id in &self.order {
-            if let Some(rec) = self.records.get(id) {
-                self.by_call
-                    .entry(rec.callsign_norm.clone())
-                    .or_default()
-                    .push(*id);
-                self.by_contest
-                    .entry(rec.contest_instance_id)
-                    .or_default()
-                    .push(*id);
+    fn update_call_index(&mut self, id: QsoId, old_call: &str, new_call: &str) {
+        if let Some(ids) = self.by_call.get_mut(old_call) {
+            ids.retain(|v| *v != id);
+            if ids.is_empty() {
+                self.by_call.remove(old_call);
             }
+        }
+        let ids = self.by_call.entry(new_call.to_string()).or_default();
+        Self::insert_id_ordered(ids, id, &self.pos);
+    }
+
+    fn update_contest_index(&mut self, id: QsoId, old: ContestInstanceId, new: ContestInstanceId) {
+        if let Some(ids) = self.by_contest.get_mut(&old) {
+            ids.retain(|v| *v != id);
+            if ids.is_empty() {
+                self.by_contest.remove(&old);
+            }
+        }
+        let ids = self.by_contest.entry(new).or_default();
+        Self::insert_id_ordered(ids, id, &self.pos);
+    }
+
+    fn insert_id_ordered(index: &mut Vec<QsoId>, id: QsoId, pos: &HashMap<QsoId, usize>) {
+        let target = *pos.get(&id).unwrap_or(&usize::MAX);
+        let at = index
+            .binary_search_by_key(&target, |existing| {
+                *pos.get(existing).unwrap_or(&usize::MAX)
+            })
+            .unwrap_or_else(|i| i);
+        index.insert(at, id);
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_indices_consistent(&self) {
+        for (call, ids) in &self.by_call {
+            let expected: Vec<QsoId> = self
+                .order
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.records
+                        .get(id)
+                        .is_some_and(|r| r.callsign_norm == *call)
+                })
+                .collect();
+            debug_assert_eq!(&expected, ids);
+        }
+        for (contest, ids) in &self.by_contest {
+            let expected: Vec<QsoId> = self
+                .order
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.records
+                        .get(id)
+                        .is_some_and(|r| r.contest_instance_id == *contest)
+                })
+                .collect();
+            debug_assert_eq!(&expected, ids);
         }
     }
 

@@ -283,7 +283,10 @@ async fn durable_ack_rejects_mutations_while_unhealthy() {
     }
     assert!(persistence_error_seen, "expected persistence error event");
 
-    let err = handle.insert(draft("D3", 3)).await.expect_err("insert should fail");
+    let err = handle
+        .insert(draft("D3", 3))
+        .await
+        .expect_err("insert should fail");
     assert!(matches!(err, RuntimeError::PersistenceUnhealthy(_)));
 
     let state = handle.persistence_state().await;
