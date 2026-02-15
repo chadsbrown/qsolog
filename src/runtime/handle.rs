@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    sync::{broadcast, mpsc, oneshot, Mutex},
+    sync::{Mutex, broadcast, mpsc, oneshot},
     time::{Duration, Instant},
 };
 
@@ -124,12 +124,12 @@ enum Command {
 }
 
 enum PersistMsg {
-    Op(StoredOp),
+    Op(Box<StoredOp>),
     Flush {
         resp: oneshot::Sender<Result<OpSeq, PersistError>>,
     },
     Checkpoint {
-        snapshot: crate::core::store::StoreSnapshotV1,
+        snapshot: Box<crate::core::store::StoreSnapshotV1>,
         last_seq: OpSeq,
         compact: bool,
         resp: oneshot::Sender<Result<(), PersistError>>,
@@ -187,7 +187,9 @@ pub fn spawn_qsolog(
                     }
                 }
             } else {
-                let Some(cmd) = cmd_rx.recv().await else { break; };
+                let Some(cmd) = cmd_rx.recv().await else {
+                    break;
+                };
                 let done = handle_command(
                     cmd,
                     &mut store,
@@ -195,7 +197,8 @@ pub fn spawn_qsolog(
                     persist_tx_opt.as_ref(),
                     &config,
                     &mut ops_since_snapshot,
-                ).await;
+                )
+                .await;
                 if done {
                     break;
                 }
@@ -203,10 +206,7 @@ pub fn spawn_qsolog(
         }
     });
 
-    QsoLogHandle {
-        cmd_tx,
-        events_tx,
-    }
+    QsoLogHandle { cmd_tx, events_tx }
 }
 
 impl QsoLogHandle {
@@ -223,10 +223,18 @@ impl QsoLogHandle {
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
 
-    pub async fn patch(&self, id: crate::types::QsoId, patch: QsoPatch) -> Result<(), RuntimeError> {
+    pub async fn patch(
+        &self,
+        id: crate::types::QsoId,
+        patch: QsoPatch,
+    ) -> Result<(), RuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Patch { id, patch, resp: tx })
+            .send(Command::Patch {
+                id,
+                patch,
+                resp: tx,
+            })
             .await
             .map_err(|_| RuntimeError::ChannelClosed)?;
         rx.await.map_err(|_| RuntimeError::ChannelClosed)?
@@ -457,11 +465,7 @@ async fn handle_command(
         Command::Flush { resp } => {
             let out = if let Some(tx) = persist_tx {
                 let (flush_tx, flush_rx) = oneshot::channel();
-                if tx
-                    .send(PersistMsg::Flush { resp: flush_tx })
-                    .await
-                    .is_err()
-                {
+                if tx.send(PersistMsg::Flush { resp: flush_tx }).await.is_err() {
                     Err(RuntimeError::ChannelClosed)
                 } else {
                     flush_rx
@@ -481,7 +485,7 @@ async fn handle_command(
                 let (cp_tx, cp_rx) = oneshot::channel();
                 if tx
                     .send(PersistMsg::Checkpoint {
-                        snapshot,
+                        snapshot: Box::new(snapshot),
                         last_seq,
                         compact: config.compact_after_snapshot,
                         resp: cp_tx,
@@ -546,6 +550,7 @@ fn spawn_persistence_worker(
 
                     match msg {
                         PersistMsg::Op(stored) => {
+                            let stored = *stored;
                             let is_insert = matches!(stored.op, Op::Insert { .. });
                             buf.push(stored);
 
@@ -560,6 +565,7 @@ fn spawn_persistence_worker(
                             deadline = Instant::now() + Duration::from_millis(config.batch_max_latency_ms);
                         }
                         PersistMsg::Checkpoint { snapshot, last_seq, compact, resp } => {
+                            let snapshot = *snapshot;
                             let flush_result = flush_buf(&sink, &mut buf, &mut last_durable, &durable_tx, true).await;
                             let result = if let Err(err) = flush_result {
                                 Err(err)
@@ -636,7 +642,9 @@ async fn flush_buf(
             Ok(())
         }
         Err(err) => {
-            let _ = durable_tx.send(Err(PersistError::Message(format!("append failed: {err:?}"))));
+            let _ = durable_tx.send(Err(PersistError::Message(format!(
+                "append failed: {err:?}"
+            ))));
             Err(err)
         }
     }
@@ -661,7 +669,7 @@ async fn maybe_auto_checkpoint(
     let (cp_tx, cp_rx) = oneshot::channel();
     if tx
         .send(PersistMsg::Checkpoint {
-            snapshot,
+            snapshot: Box::new(snapshot),
             last_seq,
             compact: config.compact_after_snapshot,
             resp: cp_tx,
@@ -675,8 +683,10 @@ async fn maybe_auto_checkpoint(
 }
 
 fn enqueue_persist(tx: &mpsc::Sender<PersistMsg>, stored: StoredOp) -> Result<(), RuntimeError> {
-    tx.try_send(PersistMsg::Op(stored))
-        .map_err(|err| RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}"))))
+    tx.try_send(PersistMsg::Op(Box::new(stored)))
+        .map_err(|err| {
+            RuntimeError::Persist(PersistError::Message(format!("persist queue error: {err}")))
+        })
 }
 
 async fn persist_after_mutation(

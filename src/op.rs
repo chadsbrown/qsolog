@@ -9,9 +9,18 @@ pub const OP_FORMAT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
-    Insert { qso: QsoRecord },
-    Patch { id: QsoId, patch: QsoPatch, prev: QsoPatch },
-    Void { id: QsoId, prev_is_void: bool },
+    Insert {
+        qso: QsoRecord,
+    },
+    Patch {
+        id: QsoId,
+        patch: QsoPatch,
+        prev: QsoPatch,
+    },
+    Void {
+        id: QsoId,
+        prev_is_void: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -44,7 +44,12 @@ pub trait ContestEngine: Send + Sync + 'static {
 
     fn new_state(&self) -> Self::State;
     fn apply(&self, state: &mut Self::State, qso: &QsoRecord) -> EngineApplied<Self::Eval>;
-    fn retract(&self, state: &mut Self::State, qso: &QsoRecord, applied: &EngineApplied<Self::Eval>);
+    fn retract(
+        &self,
+        state: &mut Self::State,
+        qso: &QsoRecord,
+        applied: &EngineApplied<Self::Eval>,
+    );
     fn diff_invalidation(
         &self,
         old: &EngineApplied<Self::Eval>,

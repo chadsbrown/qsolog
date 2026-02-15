@@ -1,4 +1,7 @@
-use std::{sync::{Arc, Mutex}, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use qsolog::{
     core::store::QsoStore,
@@ -6,7 +9,7 @@ use qsolog::{
     qso::{ExchangeBlob, QsoDraft, QsoFlags, QsoPatch},
     runtime::{
         events::QsoEvent,
-        handle::{spawn_qsolog, AckMode, RuntimeConfig, RuntimeError},
+        handle::{AckMode, RuntimeConfig, RuntimeError, spawn_qsolog},
     },
     types::{Band, Mode, OpSeq},
 };
@@ -33,7 +36,10 @@ struct SlowSink {
 }
 
 impl OpSink for SlowSink {
-    fn append_ops(&mut self, ops: &[qsolog::op::StoredOp]) -> qsolog::persist::PersistResult<OpSeq> {
+    fn append_ops(
+        &mut self,
+        ops: &[qsolog::op::StoredOp],
+    ) -> qsolog::persist::PersistResult<OpSeq> {
         std::thread::sleep(self.delay);
         let mut seen = self.seen.lock().expect("lock");
         for op in ops {
@@ -129,7 +135,10 @@ async fn durable_event_advances_and_slow_sink_surfaces_queue_pressure() {
             break;
         }
     }
-    assert!(queue_error_seen, "expected persistence queue pressure to surface as error");
+    assert!(
+        queue_error_seen,
+        "expected persistence queue pressure to surface as error"
+    );
 
     handle.shutdown().await.expect("shutdown");
     assert!(!seen.lock().expect("lock").is_empty());

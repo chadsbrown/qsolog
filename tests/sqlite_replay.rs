@@ -2,7 +2,7 @@ use tempfile::TempDir;
 
 use qsolog::{
     core::store::QsoStore,
-    persist::{sqlite::SqliteOpSink, OpSink},
+    persist::{OpSink, sqlite::SqliteOpSink},
     qso::{ExchangeBlob, QsoDraft, QsoFlags, QsoPatch},
     types::{Band, Mode},
 };
@@ -68,7 +68,9 @@ fn snapshot_and_compaction_preserve_replay() {
     let mut sink = SqliteOpSink::open(&db_path).expect("open sqlite");
 
     for i in 0..10u64 {
-        let _ = store.insert(draft(&format!("N{i}CALL"), i)).expect("insert");
+        let _ = store
+            .insert(draft(&format!("N{i}CALL"), i))
+            .expect("insert");
     }
     sink.append_ops(&store.drain_pending_ops()).expect("append");
 
@@ -98,11 +100,13 @@ fn replay_from_snapshot_plus_tail_events_matches_exact_state() {
     for i in 0..6u64 {
         let _ = store.insert(draft(&format!("W{i}AAA"), i)).expect("insert");
     }
-    sink.append_ops(&store.drain_pending_ops()).expect("append seed");
+    sink.append_ops(&store.drain_pending_ops())
+        .expect("append seed");
 
     let snapshot = store.export_snapshot();
     let snapshot_seq = store.latest_op_seq();
-    sink.write_snapshot(&snapshot, snapshot_seq).expect("snapshot");
+    sink.write_snapshot(&snapshot, snapshot_seq)
+        .expect("snapshot");
 
     let (_, _) = store
         .patch(
@@ -117,12 +121,19 @@ fn replay_from_snapshot_plus_tail_events_matches_exact_state() {
     let (_, _) = store.void(4).expect("void tail");
     let _ = store.insert(draft("W9NEW", 99)).expect("insert tail");
 
-    sink.append_ops(&store.drain_pending_ops()).expect("append tail");
+    sink.append_ops(&store.drain_pending_ops())
+        .expect("append tail");
     drop(sink);
 
     let reopened = SqliteOpSink::open(&db_path).expect("reopen");
     let replayed = reopened.load_store().expect("replay");
 
-    assert_eq!(replayed.export_snapshot().order, store.export_snapshot().order);
-    assert_eq!(replayed.export_snapshot().records, store.export_snapshot().records);
+    assert_eq!(
+        replayed.export_snapshot().order,
+        store.export_snapshot().order
+    );
+    assert_eq!(
+        replayed.export_snapshot().records,
+        store.export_snapshot().records
+    );
 }

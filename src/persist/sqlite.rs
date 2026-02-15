@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -58,9 +58,9 @@ impl SqliteOpSink {
     }
 
     pub fn load_events_after(&self, seq: OpSeq) -> PersistResult<Vec<StoredOp>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seq, ts_ms, payload FROM events WHERE seq > ?1 ORDER BY seq ASC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT seq, ts_ms, payload FROM events WHERE seq > ?1 ORDER BY seq ASC")?;
 
         let rows = stmt.query_map(params![seq], |row| {
             let seq: i64 = row.get(0)?;
@@ -85,7 +85,11 @@ impl SqliteOpSink {
         Ok(out)
     }
 
-    pub fn write_snapshot(&mut self, snapshot: &StoreSnapshotV1, last_seq: OpSeq) -> PersistResult<()> {
+    pub fn write_snapshot(
+        &mut self,
+        snapshot: &StoreSnapshotV1,
+        last_seq: OpSeq,
+    ) -> PersistResult<()> {
         let env = SnapshotEnvelope {
             format_version: SNAPSHOT_FORMAT_VERSION,
             snapshot: snapshot.clone(),
@@ -130,7 +134,9 @@ impl SqliteOpSink {
 
         let env: SnapshotEnvelope = serde_json::from_slice(&payload)?;
         if env.format_version != SNAPSHOT_FORMAT_VERSION {
-            return Err(PersistError::Message("unsupported snapshot format".to_string()));
+            return Err(PersistError::Message(
+                "unsupported snapshot format".to_string(),
+            ));
         }
         Ok(Some(env.snapshot))
     }
@@ -205,5 +211,6 @@ fn decode_stored_op_payload(payload: &[u8]) -> Result<StoredOp, String> {
     }
 
     // Backward-compatible path for older payloads that stored raw StoredOp.
-    serde_json::from_slice::<StoredOp>(payload).map_err(|e| format!("op payload decode failed: {e}"))
+    serde_json::from_slice::<StoredOp>(payload)
+        .map_err(|e| format!("op payload decode failed: {e}"))
 }

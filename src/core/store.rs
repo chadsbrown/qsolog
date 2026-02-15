@@ -233,7 +233,11 @@ impl QsoStore {
         self.apply_insert_with_seq(qso, seq)
     }
 
-    fn apply_insert_with_seq(&mut self, qso: QsoRecord, seq: OpSeq) -> Result<(StoredOp, Op), StoreError> {
+    fn apply_insert_with_seq(
+        &mut self,
+        qso: QsoRecord,
+        seq: OpSeq,
+    ) -> Result<(StoredOp, Op), StoreError> {
         if self.records.contains_key(&qso.id) {
             return Err(StoreError::AlreadyExists(qso.id));
         }
@@ -263,9 +267,17 @@ impl QsoStore {
         self.apply_patch_with_seq(id, patch, seq)
     }
 
-    fn apply_patch_with_seq(&mut self, id: QsoId, patch: QsoPatch, seq: OpSeq) -> Result<(StoredOp, Op), StoreError> {
+    fn apply_patch_with_seq(
+        &mut self,
+        id: QsoId,
+        patch: QsoPatch,
+        seq: OpSeq,
+    ) -> Result<(StoredOp, Op), StoreError> {
         let (prev, call_changed, contest_changed) = {
-            let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+            let rec = self
+                .records
+                .get_mut(&id)
+                .ok_or(StoreError::MissingQso(id))?;
             let old_call = rec.callsign_norm.clone();
             let old_contest = rec.contest_instance_id;
 
@@ -306,9 +318,17 @@ impl QsoStore {
         self.apply_void_with_seq(id, prev_is_void, seq)
     }
 
-    fn apply_void_with_seq(&mut self, id: QsoId, prev_is_void: bool, seq: OpSeq) -> Result<(StoredOp, Op), StoreError> {
+    fn apply_void_with_seq(
+        &mut self,
+        id: QsoId,
+        prev_is_void: bool,
+        seq: OpSeq,
+    ) -> Result<(StoredOp, Op), StoreError> {
         let new_is_void = {
-            let rec = self.records.get_mut(&id).ok_or(StoreError::MissingQso(id))?;
+            let rec = self
+                .records
+                .get_mut(&id)
+                .ok_or(StoreError::MissingQso(id))?;
             rec.flags.is_void = !prev_is_void;
             rec.flags.is_void
         };

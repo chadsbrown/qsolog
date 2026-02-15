@@ -38,16 +38,24 @@ impl<E: ContestEngine> Projector<E> {
         &self.applied
     }
 
-    pub fn apply_stored_op(&mut self, store: &QsoStore, stored: &StoredOp) -> Result<(), ProjectorError> {
+    pub fn apply_stored_op(
+        &mut self,
+        store: &QsoStore,
+        stored: &StoredOp,
+    ) -> Result<(), ProjectorError> {
         let (changed_id, old_record) = match &stored.op {
             Op::Insert { qso } => (qso.id, None),
             Op::Patch { id, prev, .. } => {
-                let mut old = store.get_cloned(*id).ok_or(ProjectorError::MissingQso(*id))?;
+                let mut old = store
+                    .get_cloned(*id)
+                    .ok_or(ProjectorError::MissingQso(*id))?;
                 prev.apply_to(&mut old);
                 (*id, Some(old))
             }
             Op::Void { id, prev_is_void } => {
-                let mut old = store.get_cloned(*id).ok_or(ProjectorError::MissingQso(*id))?;
+                let mut old = store
+                    .get_cloned(*id)
+                    .ok_or(ProjectorError::MissingQso(*id))?;
                 old.flags.is_void = *prev_is_void;
                 (*id, Some(old))
             }
@@ -83,7 +91,8 @@ impl<E: ContestEngine> Projector<E> {
         let mut old_record_once = old_record_for_changed;
 
         loop {
-            let changed_keys = self.recompute_impacted(store, &impacted, changed_id, old_record_once.as_ref())?;
+            let changed_keys =
+                self.recompute_impacted(store, &impacted, changed_id, old_record_once.as_ref())?;
             old_record_once = None;
 
             let mut expanded = false;
@@ -129,10 +138,13 @@ impl<E: ContestEngine> Projector<E> {
                     .or_else(|| store.get_cloned(*id))
                     .ok_or(ProjectorError::MissingQso(*id))?
             } else {
-                store.get_cloned(*id).ok_or(ProjectorError::MissingQso(*id))?
+                store
+                    .get_cloned(*id)
+                    .ok_or(ProjectorError::MissingQso(*id))?
             };
 
-            self.engine.retract(&mut self.state, &rec_for_retract, &old_applied);
+            self.engine
+                .retract(&mut self.state, &rec_for_retract, &old_applied);
             self.remove_dep_links(*id, &old_applied.deps);
             old_applied_subset.insert(*id, old_applied);
         }

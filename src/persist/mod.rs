@@ -1,10 +1,6 @@
 pub mod sqlite;
 
-use crate::{
-    core::store::StoreSnapshotV1,
-    op::StoredOp,
-    types::OpSeq,
-};
+use crate::{core::store::StoreSnapshotV1, op::StoredOp, types::OpSeq};
 
 #[derive(Debug)]
 pub enum PersistError {
@@ -38,7 +34,11 @@ pub trait OpSink: Send {
     fn flush(&mut self) -> PersistResult<()> {
         Ok(())
     }
-    fn write_snapshot(&mut self, _snapshot: &StoreSnapshotV1, _last_seq: OpSeq) -> PersistResult<()> {
+    fn write_snapshot(
+        &mut self,
+        _snapshot: &StoreSnapshotV1,
+        _last_seq: OpSeq,
+    ) -> PersistResult<()> {
         Ok(())
     }
     fn compact_through(&mut self, _seq: OpSeq) -> PersistResult<usize> {

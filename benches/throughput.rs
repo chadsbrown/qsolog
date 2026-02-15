@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use qsolog::{
     core::store::QsoStore,
@@ -73,5 +73,10 @@ fn bench_recent_query(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_inserts, bench_random_patches, bench_recent_query);
+criterion_group!(
+    benches,
+    bench_inserts,
+    bench_random_patches,
+    bench_recent_query
+);
 criterion_main!(benches);

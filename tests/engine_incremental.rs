@@ -5,9 +5,7 @@ use qsolog::{
     core::store::QsoStore,
     engine::{
         projector::Projector,
-        traits::{
-            ContestEngine, DepKey, DupeKey, EngineApplied, Invalidation, MultKey,
-        },
+        traits::{ContestEngine, DepKey, DupeKey, EngineApplied, Invalidation, MultKey},
     },
     qso::{ExchangeBlob, QsoDraft, QsoFlags, QsoPatch, QsoRecord},
     types::{Band, Mode, QsoId},
@@ -44,12 +42,7 @@ impl ContestEngine for ToyEngine {
             mode: qso.mode,
         };
 
-        let mult_prefix = qso
-            .callsign_norm
-            .chars()
-            .next()
-            .unwrap_or('_')
-            .to_string();
+        let mult_prefix = qso.callsign_norm.chars().next().unwrap_or('_').to_string();
         let mult_bucket = format!("{:?}:{mult_prefix}", qso.band);
 
         let prev_dupe_count = *state.dupe_counts.get(&dupe_key).unwrap_or(&0);
@@ -72,7 +65,12 @@ impl ContestEngine for ToyEngine {
         }
     }
 
-    fn retract(&self, state: &mut Self::State, _qso: &QsoRecord, applied: &EngineApplied<Self::Eval>) {
+    fn retract(
+        &self,
+        state: &mut Self::State,
+        _qso: &QsoRecord,
+        applied: &EngineApplied<Self::Eval>,
+    ) {
         for dep in &applied.deps {
             match dep {
                 DepKey::Dupe(k) => {
@@ -113,7 +111,9 @@ impl ContestEngine for ToyEngine {
             }
         }
 
-        Invalidation { keys_changed: changed }
+        Invalidation {
+            keys_changed: changed,
+        }
     }
 }
 
@@ -222,11 +222,15 @@ fn incremental_projection_matches_full_recompute_and_undo_redo_restores() {
     assert_eq!(full, after_patch);
 
     let (_, undo_op) = store.undo().expect("undo");
-    projector.apply_stored_op(&store, &undo_op).expect("proj undo");
+    projector
+        .apply_stored_op(&store, &undo_op)
+        .expect("proj undo");
     assert_eq!(projector.applied().clone(), before_patch);
 
     let (_, redo_op) = store.redo().expect("redo");
-    projector.apply_stored_op(&store, &redo_op).expect("proj redo");
+    projector
+        .apply_stored_op(&store, &redo_op)
+        .expect("proj redo");
     assert_eq!(projector.applied().clone(), after_patch);
 }
 

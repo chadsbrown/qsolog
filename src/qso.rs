@@ -69,7 +69,10 @@ impl QsoPatch {
         Self {
             contest_instance_id: self.contest_instance_id.map(|_| rec.contest_instance_id),
             callsign_raw: self.callsign_raw.as_ref().map(|_| rec.callsign_raw.clone()),
-            callsign_norm: self.callsign_norm.as_ref().map(|_| rec.callsign_norm.clone()),
+            callsign_norm: self
+                .callsign_norm
+                .as_ref()
+                .map(|_| rec.callsign_norm.clone()),
             band: self.band.map(|_| rec.band),
             mode: self.mode.map(|_| rec.mode),
             freq_hz: self.freq_hz.map(|_| rec.freq_hz),
